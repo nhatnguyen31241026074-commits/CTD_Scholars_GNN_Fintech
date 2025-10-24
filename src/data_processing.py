@@ -6,6 +6,14 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Optional imports for graph creation. Keep optional so module imports even if torch is not installed.
+try:
+	import torch
+	from torch_geometric.data import Data
+except Exception:
+	torch = None
+	Data = None
+
 
 def generate_synthetic_transactions(
 	num_users: int,
@@ -89,7 +97,96 @@ def generate_synthetic_transactions(
 	return df
 
 
-__all__ = ["generate_synthetic_transactions"]
+def _encode_transaction_types(df: pd.DataFrame) -> dict:
+	"""Create a mapping for transaction types to integer indices.
+
+	Returns a dict mapping type->index and ensures consistent ordering.
+	"""
+	types = sorted(df['transaction_type'].unique().tolist())
+	mapping = {t: i for i, t in enumerate(types)}
+	return mapping
+
+
+def _normalize_amounts(amounts: np.ndarray) -> np.ndarray:
+	"""Min-max normalize amounts to [0,1]."""
+	min_a = amounts.min()
+	max_a = amounts.max()
+	denom = (max_a - min_a) if max_a > min_a else 1.0
+	return (amounts - min_a) / denom
+
+
+def _time_hour_sin_cos(timestamps: pd.Series) -> np.ndarray:
+	"""Compute cyclical hour features (sin, cos) from datetime-like series."""
+	# Ensure datetime
+	hours = timestamps.dt.hour.astype(float)
+	radians = 2 * np.pi * hours / 24.0
+	sin = np.sin(radians)
+	cos = np.cos(radians)
+	return np.vstack([sin.values, cos.values]).T
+
+
+def _transaction_type_onehot(types: pd.Series, mapping: dict) -> np.ndarray:
+	num = len(types)
+	k = len(mapping)
+	onehot = np.zeros((num, k), dtype=float)
+	for i, t in enumerate(types):
+		idx = mapping.get(t, None)
+		if idx is not None:
+			onehot[i, idx] = 1.0
+	return onehot
+
+
+def create_graph_snapshot(transactions_df: pd.DataFrame, user_list: List[str]) -> 'Data':
+	"""Create a torch_geometric Data object from transactions.
+
+	Parameters
+	- transactions_df: DataFrame with columns ['sender_id','receiver_id','amount','timestamp','transaction_type']
+	- user_list: list of all user ids (defines node ordering)
+
+	Returns
+	- torch_geometric.data.Data with x, edge_index, edge_attr
+	"""
+	if torch is None or Data is None:
+		raise ImportError("create_graph_snapshot requires 'torch' and 'torch_geometric' to be installed")
+
+	# create mapping user_id -> index
+	user_to_idx = {u: i for i, u in enumerate(user_list)}
+	num_nodes = len(user_list)
+
+	# Ensure timestamps are datetime
+	df = transactions_df.copy()
+	if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+		df['timestamp'] = pd.to_datetime(df['timestamp'])
+
+	# Edge index (2, N)
+	senders = df['sender_id'].map(user_to_idx).astype(int).values
+	receivers = df['receiver_id'].map(user_to_idx).astype(int).values
+	edge_index = torch.tensor([senders, receivers], dtype=torch.long)
+
+	# Edge attributes
+	amounts = df['amount'].to_numpy(dtype=float)
+	amounts_norm = _normalize_amounts(amounts).reshape(-1, 1)
+
+	time_feats = _time_hour_sin_cos(df['timestamp'])  # Nx2
+
+	type_map = _encode_transaction_types(df)
+	type_onehot = _transaction_type_onehot(df['transaction_type'], type_map)  # NxK
+
+	edge_attr_np = np.hstack([amounts_norm, time_feats, type_onehot])
+	edge_attr = torch.tensor(edge_attr_np, dtype=torch.float)
+
+	# Node features placeholder: Px1 tensor of ones
+	x = torch.ones((num_nodes, 1), dtype=torch.float)
+
+	data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr)
+	# attach ancillary metadata for convenience
+	data.user_to_idx = user_to_idx
+	data.type_mapping = type_map
+
+	return data
+
+
+__all__ = ["generate_synthetic_transactions", "create_graph_snapshot"]
 
 
 if __name__ == "__main__":
@@ -110,4 +207,16 @@ if __name__ == "__main__":
 	print(f"Đã tạo và lưu {len(df_transactions)} giao dịch vào file: {output_path}")
 	print("5 dòng dữ liệu đầu tiên:")
 	print(df_transactions.head())
+
+	print("\nBắt đầu tạo snapshot đồ thị...")
+	all_users = pd.concat([df_transactions['sender_id'], df_transactions['receiver_id']]).unique().tolist()
+	try:
+		graph_snapshot = create_graph_snapshot(df_transactions, all_users)
+		print("Đã tạo snapshot đồ thị:")
+		print(graph_snapshot)
+		# Optionally save snapshot
+		# torch.save(graph_snapshot, script_dir.parent / "data" / "sample_graph_snapshot.pt")
+	except Exception as e:
+		print("Không thể tạo snapshot đồ thị:", str(e))
+		print("Để tạo snapshot bạn cần cài đặt 'torch' và 'torch-geometric'. Ví dụ: pip install torch torch-geometric (vui lòng tham khảo tài liệu chính thức để chọn phiên bản tương thích).")
 
