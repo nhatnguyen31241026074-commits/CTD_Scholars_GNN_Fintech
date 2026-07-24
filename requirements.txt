@@ -1,0 +1,10 @@
+# Curated direct dependencies (UTF-8).
+# NOTE: install torch + torch-geometric matched to your CUDA/CPU build FIRST,
+# following https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html
+torch>=2.1
+torch-geometric>=2.4
+pandas>=2.0
+numpy>=1.24
+
+# Optional experiment tracking
+# wandb>=0.16
